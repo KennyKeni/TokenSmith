@@ -120,31 +120,39 @@ def get_system_prompt(mode="tutor"):
     return prompts.get(mode)
 
 
-def format_prompt(chunks, query, max_chunk_chars=400, system_prompt_mode="tutor"):
+def format_prompt(chunks, query, max_chunk_chars=400, system_prompt_mode="tutor", conversation_history=None):
     """
     Format prompt for LLM with chunks and query.
-    
+
     Args:
         chunks: List of text chunks (can be empty for baseline)
         query: User question
         max_chunk_chars: Maximum characters per chunk
         system_prompt_mode: System prompt mode (baseline, tutor, concise, detailed)
+        conversation_history: List of dicts with 'question' and 'answer' keys (optional)
     """
     # Get system prompt
     system_prompt = get_system_prompt(system_prompt_mode)
     system_section = f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n" if system_prompt else ""
-    
+
+    # Build conversation history section
+    history_section = ""
+    if conversation_history:
+        for entry in conversation_history:
+            history_section += f"<|im_start|>user\n{entry['question']}\n<|im_end|>\n"
+            history_section += f"<|im_start|>assistant\n{entry['answer']}\n<|im_end|>\n"
+
     # Build prompt based on whether chunks are provided
     if chunks and len(chunks) > 0:
         trimmed = [(c or "")[:max_chunk_chars] for c in chunks]
         context = "\n\n".join(trimmed)
         context = text_cleaning(context)
-        
+
         # Build prompt with chunks
         context_section = f"Textbook Excerpts:\n{context}\n\n\n"
-        
+
         return textwrap.dedent(f"""\
-            {system_section}<|im_start|>user
+            {system_section}{history_section}<|im_start|>user
             {context_section}Question: {query}
             <|im_end|>
             <|im_start|>assistant
@@ -153,9 +161,9 @@ def format_prompt(chunks, query, max_chunk_chars=400, system_prompt_mode="tutor"
     else:
         # Build prompt without chunks
         question_label = "Question: " if system_prompt else ""
-        
+
         return textwrap.dedent(f"""\
-            {system_section}<|im_start|>user
+            {system_section}{history_section}<|im_start|>user
             {question_label}{query}
             <|im_end|>
             <|im_start|>assistant
@@ -212,17 +220,99 @@ def _dedupe_sentences(text: str) -> str:
             cleaned.append(s)
     return " ".join(cleaned)
 
-def answer(query: str, chunks, model_path: str, max_tokens: int = 300, **kw):
-    prompt = format_prompt(chunks, query)
-    approx_tokens = max(1, len(prompt) // 4)
-    #print(f"\n⚙️  Prompt length ≈ {approx_tokens} tokens\n")
-    raw = run_llama_cpp(prompt, model_path, max_tokens=max_tokens, **kw)
-    return _dedupe_sentences(raw)
+def _format_references(chunk_metadata: list) -> str:
+    if not chunk_metadata:
+        return ""
 
-def answer(query: str, chunks, model_path: str, max_tokens: int = 300, 
-           system_prompt_mode: str = "tutor", **kw):
-    prompt = format_prompt(chunks, query, system_prompt_mode=system_prompt_mode)
+    # Collect unique references
+    references = {}
+    for meta in chunk_metadata:
+        section = meta.get("section")
+        page_num = meta.get("page_number")
+        chunk_id = meta.get("chunk_id")
+
+        # Create reference key
+        if section and page_num:
+            key = section
+            if key not in references:
+                references[key] = {"pages": set(), "type": "full"}
+            references[key]["pages"].add(page_num)
+        elif section:
+            key = section
+            if key not in references:
+                references[key] = {"pages": set(), "type": "section_only"}
+        elif page_num:
+            key = f"Page {page_num}"
+            if key not in references:
+                references[key] = {"pages": {page_num}, "type": "page_only"}
+        elif chunk_id is not None:
+            key = f"Chunk {chunk_id}"
+            if key not in references:
+                references[key] = {"pages": set(), "type": "chunk_only"}
+
+    if not references:
+        return ""
+
+    # Format references
+    ref_lines = []
+    for key, data in references.items():
+        if data["type"] == "full":
+            pages = sorted(data["pages"])
+            if len(pages) == 1:
+                ref_lines.append(f"- {key} (Page {pages[0]})")
+            else:
+                page_ranges = _compress_range(pages)
+                ref_lines.append(f"- {key} (Pages {page_ranges})")
+        elif data["type"] == "section_only":
+            ref_lines.append(f"- {key}")
+        elif data["type"] == "page_only":
+            ref_lines.append(f"- {key}")
+        elif data["type"] == "chunk_only":
+            ref_lines.append(f"- {key}")
+
+    if ref_lines:
+        return "References:\n" + "\n".join(ref_lines)
+    return ""
+
+def _compress_range(pages: list) -> str:
+    if not pages:
+        return ""
+
+    ranges = []
+    start = pages[0]
+    end = pages[0]
+
+    for i in range(1, len(pages)):
+        if pages[i] == end + 1:
+            end = pages[i]
+        else:
+            if start == end:
+                ranges.append(str(start))
+            else:
+                ranges.append(f"{start}-{end}")
+            start = pages[i]
+            end = pages[i]
+
+    if start == end:
+        ranges.append(str(start))
+    else:
+        ranges.append(f"{start}-{end}")
+
+    return ", ".join(ranges)
+
+def answer(query: str, chunks, model_path: str, max_tokens: int = 300,
+           system_prompt_mode: str = "tutor", conversation_history=None, chunk_metadata=None, **kw):
+    prompt = format_prompt(chunks, query, system_prompt_mode=system_prompt_mode,
+                          conversation_history=conversation_history)
     # approx_tokens = max(1, len(prompt) // 4)
     #print(f"\n⚙️  Prompt length ≈ {approx_tokens} tokens (mode: {system_prompt_mode})\n")
     raw = run_llama_cpp(prompt, model_path, max_tokens=max_tokens, **kw)
-    return _dedupe_sentences(raw)
+    answer_text = _dedupe_sentences(raw)
+
+    # Add references
+    if chunk_metadata:
+        references = _format_references(chunk_metadata)
+        if references:
+            answer_text = f"{answer_text}\n\n{references}"
+
+    return answer_text

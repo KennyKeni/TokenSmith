@@ -2,8 +2,12 @@ embed_model: "models/Qwen3-Embedding-4B-Q5_K_M.gguf"
 top_k: 5
 pool_size: 50
 ensemble_method: "rrf"
-ranker_weights: {"faiss":1,"bm25":0}
+ranker_weights: {"faiss":0.6,"bm25":0.4}
 rrf_k: 60
+use_hnsw: true
+hnsw_m: 32
+hnsw_ef_construction: 200
+hnsw_ef_search: 50
 max_gen_tokens: 400
 seg_filter: null
 chunk_mode : "sections"
@@ -13,3 +17,5 @@ recursive_overlap: 200
 use_hyde: false
 hyde_max_tokens: 600
 use_indexed_chunks: false
+max_history_turns: 3
+enable_query_rewriting: true

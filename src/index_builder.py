@@ -45,8 +45,11 @@ def build_index(
     chunk_config: ChunkConfig,
     embedding_model_path: str,
     artifacts_dir: os.PathLike,
-    index_prefix: str, 
+    index_prefix: str,
     do_visualize: bool = False,
+    use_hnsw: bool = True,
+    hnsw_m: int = 32,
+    hnsw_ef_construction: int = 200,
 ) -> None:
     """
     Extract sections, chunk, embed, and build both FAISS and BM25 indexes.
@@ -155,12 +158,19 @@ def build_index(
     )
 
     # Step 3: Build FAISS index
-    print(f"Building FAISS index for {len(all_chunks):,} chunks...")
     dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(embeddings)
+    if use_hnsw:
+        print(f"Building HNSW index for {len(all_chunks):,} chunks (M={hnsw_m}, ef_construction={hnsw_ef_construction})...")
+        index = faiss.IndexHNSWFlat(dim, hnsw_m)
+        index.hnsw.efConstruction = hnsw_ef_construction
+        index.add(embeddings)
+        print(f"HNSW Index built successfully: {index_prefix}.faiss")
+    else:
+        print(f"Building Flat L2 index for {len(all_chunks):,} chunks...")
+        index = faiss.IndexFlatL2(dim)
+        index.add(embeddings)
+        print(f"Flat L2 Index built successfully: {index_prefix}.faiss")
     faiss.write_index(index, str(artifacts_dir / f"{index_prefix}.faiss"))
-    print(f"FAISS Index built successfully: {index_prefix}.faiss")
 
     # Step 4: Build BM25 index
     print(f"Building BM25 index for {len(all_chunks):,} chunks...")

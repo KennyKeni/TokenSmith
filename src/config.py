@@ -28,9 +28,9 @@ class QueryPlanConfig:
 
     # generation
     max_gen_tokens: int
-    
+
     model_path: os.PathLike
-    
+
     # testing
     system_prompt_mode: str
     disable_chunks: bool
@@ -42,6 +42,16 @@ class QueryPlanConfig:
     use_hyde: bool
     hyde_max_tokens: int
     use_indexed_chunks: bool
+
+    # conversation history
+    max_history_turns: int
+    enable_query_rewriting: bool
+
+    # HNSW configuration
+    use_hnsw: bool
+    hnsw_m: int
+    hnsw_ef_construction: int
+    hnsw_ef_search: int
 
     # ---------- chunking strategy + artifact name helpers ----------
     def make_strategy(self) -> ChunkStrategy:
@@ -91,6 +101,16 @@ class QueryPlanConfig:
             # Query Enhancement
             use_hyde       = pick("use_hyde", False),
             hyde_max_tokens= pick("hyde_max_tokens", 100),
+
+            # Conversation History
+            max_history_turns = pick("max_history_turns", 3),
+            enable_query_rewriting = pick("enable_query_rewriting", True),
+
+            # HNSW configuration
+            use_hnsw       = pick("use_hnsw", True),
+            hnsw_m         = pick("hnsw_m", 32),
+            hnsw_ef_construction = pick("hnsw_ef_construction", 200),
+            hnsw_ef_search = pick("hnsw_ef_search", 50),
         )
         cfg._validate()
         return cfg
@@ -137,4 +157,10 @@ class QueryPlanConfig:
             "use_indexed_chunks": self.use_indexed_chunks,
             "use_hyde": self.use_hyde,
             "hyde_max_tokens": self.hyde_max_tokens,
+            "max_history_turns": self.max_history_turns,
+            "enable_query_rewriting": self.enable_query_rewriting,
+            "use_hnsw": self.use_hnsw,
+            "hnsw_m": self.hnsw_m,
+            "hnsw_ef_construction": self.hnsw_ef_construction,
+            "hnsw_ef_search": self.hnsw_ef_search,
         }

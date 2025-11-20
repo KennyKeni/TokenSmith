@@ -11,7 +11,7 @@ from src.instrumentation.logging import init_logger, get_logger, RunLogger
 from src.ranking.ranker import EnsembleRanker
 from src.preprocessing.chunking import DocumentChunker
 from src.retriever import apply_seg_filter, BM25Retriever, FAISSRetriever, load_artifacts
-from src.query_enhancement import generate_hypothetical_document
+from src.query_enhancement import generate_hypothetical_document, rewrite_query_with_history
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,6 +98,9 @@ def run_index_mode(args: argparse.Namespace, cfg: QueryPlanConfig):
         artifacts_dir=artifacts_dir,
         index_prefix=args.index_prefix,
         do_visualize=args.visualize,
+        use_hnsw=cfg.use_hnsw,
+        hnsw_m=cfg.hnsw_m,
+        hnsw_ef_construction=cfg.hnsw_ef_construction,
     )
 
 def use_indexed_chunks(question: str, chunks: list, logger: "RunLogger") -> list:
@@ -136,16 +139,18 @@ def get_answer(
     logger: "RunLogger",
     artifacts: Optional[Dict] = None,
     golden_chunks: Optional[list] = None,
-    is_test_mode: bool = False
+    is_test_mode: bool = False,
+    conversation_history: Optional[list] = None
 ) -> str:
     """
     Run a single query through the pipeline.
-    """    
+    """
     chunks = artifacts["chunks"]
     sources = artifacts["sources"]
     retrievers = artifacts["retrievers"]
     ranker = artifacts["ranker"]
-    
+    metadata = artifacts.get("metadata", None)
+
     logger.log_query_start(question)
     
     # Step 1: Get chunks (golden, retrieved, or none)
@@ -161,17 +166,26 @@ def get_answer(
         # Use chunks from the textbook index
         ranked_chunks = use_indexed_chunks(question, chunks, logger)
     else:
-        # Step 0: Query Enhancement (HyDE)
+        # Step 0a: Query Rewriting (if enabled and history exists)
         retrieval_query = question
+        if cfg.enable_query_rewriting and conversation_history and len(conversation_history) > 0:
+            model_path = args.model_path or cfg.model_path
+            rewritten_query = rewrite_query_with_history(
+                question, conversation_history, model_path
+            )
+            retrieval_query = rewritten_query
+            print(f"Rewritten query: {rewritten_query}")
+
+        # Step 0b: Query Enhancement (HyDE)
         if cfg.use_hyde:
             model_path = args.model_path or cfg.model_path
             hypothetical_doc = generate_hypothetical_document(
-                question, model_path, max_tokens=cfg.hyde_max_tokens
+                retrieval_query, model_path, max_tokens=cfg.hyde_max_tokens
             )
             retrieval_query = hypothetical_doc
             hyde_query = hypothetical_doc
             # print(f"🔍 HyDE query: {hypothetical_doc}")
-        
+
         # Step 1: Retrieval
         pool_n = max(cfg.pool_size, cfg.top_k + 10)
         raw_scores: Dict[str, Dict[int, float]] = {}
@@ -217,14 +231,23 @@ def get_answer(
     # Step 4: Generation
     model_path = args.model_path or cfg.model_path
     system_prompt = args.system_prompt_mode or cfg.system_prompt_mode
+
+    # Gather metadata
+    chunk_metadata = None
+    if metadata and not cfg.disable_chunks and ranked_chunks:
+        if not (golden_chunks and cfg.use_golden_chunks) and 'topk_idxs' in locals():
+            chunk_metadata = [metadata[i] for i in topk_idxs]
+
     ans = answer(
-        question, 
-        ranked_chunks, 
-        model_path, 
-        max_tokens=cfg.max_gen_tokens, 
-        system_prompt_mode=system_prompt
+        question,
+        ranked_chunks,
+        model_path,
+        max_tokens=cfg.max_gen_tokens,
+        system_prompt_mode=system_prompt,
+        conversation_history=conversation_history,
+        chunk_metadata=chunk_metadata
     )
-    
+
     if is_test_mode:
         return ans, chunks_info, hyde_query
     return ans
@@ -255,12 +278,20 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
         # cfg = planner.plan(q)
         artifacts_dir = cfg.make_artifacts_directory()
         faiss_index, bm25_index, chunks, sources = load_artifacts(
-            artifacts_dir=artifacts_dir, 
+            artifacts_dir=artifacts_dir,
             index_prefix=args.index_prefix
         )
 
+        # Load metadata
+        import pickle
+        metadata_path = artifacts_dir / f"{args.index_prefix}_meta.pkl"
+        metadata = None
+        if metadata_path.exists():
+            with open(metadata_path, "rb") as f:
+                metadata = pickle.load(f)
+
         retrievers = [
-            FAISSRetriever(faiss_index, cfg.embed_model),
+            FAISSRetriever(faiss_index, cfg.embed_model, cfg.hnsw_ef_search),
             BM25Retriever(bm25_index)
         ]
         ranker = EnsembleRanker(
@@ -268,13 +299,14 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
             weights=cfg.ranker_weights,
             rrf_k=int(cfg.rrf_k)
         )
-        
+
         # Package artifacts for reuse
         artifacts = {
             "chunks": chunks,
             "sources": sources,
             "retrievers": retrievers,
-            "ranker": ranker
+            "ranker": ranker,
+            "metadata": metadata
         }
     except Exception as e:
         print(f"ERROR: Failed to initialize chat artifacts: {e}")
@@ -283,6 +315,11 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
 
     print("Initialization complete. You can start asking questions!")
     print("Type 'exit' or 'quit' to end the session.")
+    if cfg.max_history_turns > 0:
+        print(f"Chat history enabled (keeping last {cfg.max_history_turns} turns). Type 'clear' to reset conversation.")
+
+    conversation_history = []
+
     while True:
         try:
             q = input("\nAsk > ").strip()
@@ -291,14 +328,24 @@ def run_chat_session(args: argparse.Namespace, cfg: QueryPlanConfig):
             if q.lower() in {"exit", "quit"}:
                 print("Goodbye!")
                 break
+            if q.lower() == "clear":
+                conversation_history = []
+                print("Conversation history cleared.")
+                continue
 
-            # Use the single query function
-            ans = get_answer(q, cfg, args, logger=logger,artifacts=artifacts)
+            history_to_pass = conversation_history if cfg.max_history_turns > 0 else None
+            ans = get_answer(q, cfg, args, logger=logger, artifacts=artifacts,
+                           conversation_history=history_to_pass)
 
             print("\n=================== START OF ANSWER ===================")
             print(ans.strip() if ans and ans.strip() else "(No output from model)")
             print("\n==================== END OF ANSWER ====================")
             logger.log_generation(ans, {"max_tokens": cfg.max_gen_tokens, "model_path": args.model_path or cfg.model_path})
+
+            if cfg.max_history_turns > 0:
+                conversation_history.append({"question": q, "answer": ans})
+                if len(conversation_history) > cfg.max_history_turns:
+                    conversation_history = conversation_history[-cfg.max_history_turns:]
 
         except KeyboardInterrupt:
             print("\nGoodbye!")

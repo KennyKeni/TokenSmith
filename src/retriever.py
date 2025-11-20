@@ -96,9 +96,11 @@ class Retriever(ABC):
 class FAISSRetriever(Retriever):
     name = "faiss"
 
-    def __init__(self, index, embed_model: str):
+    def __init__(self, index, embed_model: str, hnsw_ef_search: int = 50):
         self.index = index
         self.embedder = _get_embedder(embed_model)
+        if hasattr(index, 'hnsw'):
+            index.hnsw.efSearch = hnsw_ef_search
 
     def get_scores(self,
                 query: str,
