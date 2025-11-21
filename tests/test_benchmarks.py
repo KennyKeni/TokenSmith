@@ -206,6 +206,13 @@ def get_tokensmith_answer(question, config, golden_chunks=None):
         metrics=config.get("metrics", ["all"]),
         use_hyde=config.get("use_hyde", False),
         hyde_max_tokens=config.get("hyde_max_tokens", 100),
+        use_indexed_chunks=config.get("use_indexed_chunks", False),
+        max_history_turns=config.get("max_history_turns", 3),
+        enable_query_rewriting=config.get("enable_query_rewriting", True),
+        use_hnsw=config.get("use_hnsw", True),
+        hnsw_m=config.get("hnsw_m", 32),
+        hnsw_ef_construction=config.get("hnsw_ef_construction", 200),
+        hnsw_ef_search=config.get("hnsw_ef_search", 50),
     )
     
     # Print status
